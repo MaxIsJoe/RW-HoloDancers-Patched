@@ -1,0 +1,160 @@
+using RimWorld;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using UnityEngine;
+using Verse;
+
+namespace HoloDancers
+{
+    [AttributeUsage(AttributeTargets.Class | AttributeTargets.Struct)]
+    public class HotSwappableAttribute : Attribute
+    {
+    }
+    [HotSwappable]
+    public class Building_HoloDancer : Building
+    {
+        private int frameIndex;
+        private string chosenAnimPath;
+        private Graphic chosenGraphic;
+        private HoloDancerExtension cachedModExtension;
+        private HoloDancerExtension ModExtension
+        {
+            get
+            {
+                if (cachedModExtension == null)
+                {
+                    cachedModExtension = def.GetModExtension<HoloDancerExtension>();
+                }
+                return cachedModExtension;
+            }
+        }
+
+        // Cache animation paths per baseTexFolder so Male/Female don't share a single static list.
+        private static readonly Dictionary<string, List<string>> animationPathsByFolder = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+
+        private void CacheAnimationPathsFor(string baseFolder)
+        {
+            if (baseFolder == null) baseFolder = "";
+            if (animationPathsByFolder.ContainsKey(baseFolder))
+            {
+                return;
+            }
+
+            var subfolders = new HashSet<string>();
+            string texturePathPrefix = "Textures/" + baseFolder + "/";
+
+            foreach (var mod in LoadedModManager.RunningMods)
+            {
+                try
+                {
+                    //Dictionary<string, FileInfo> allFiles = ModContentPack.GetAllFilesForMod(mod, "Textures/", (string e) => e.ToLower() == ".png");
+                    List<Tuple<string, FileInfo>> sortedFiles = ModContentPack.GetAllFilesForMod(mod, "Textures/", (string e) => e.ToLower() == ".png")
+                        .Select(kv => Tuple.Create(kv.Key.Replace('\\', '/'), kv.Value))
+                        .OrderBy(t => t.Item1, StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                    Debug.Log($"HoloDancer: Mod '{mod.Name}' has {sortedFiles.Count} texture files.");
+                    foreach (Tuple<string, FileInfo> file in sortedFiles)
+                    {
+                        Debug.Log($"HoloDancer: Mod '{mod.Name}' file: '{file.Item1}'");
+                        string path = file.Item1.Replace('\\', '/');
+                        if (path.StartsWith(texturePathPrefix, StringComparison.OrdinalIgnoreCase))
+                        {
+                            string remainder = path.Substring(texturePathPrefix.Length);
+                            string[] parts = remainder.Split('/');
+                            if (parts.Length > 1)
+                            {
+                                subfolders.Add(parts[0]);
+                            }
+                        }
+                    }
+                }
+                catch (Exception e)
+                {
+                    Debug.LogError($"HoloDancer: Error processing mod '{mod.Name}': {e}");
+                }
+            }
+            var paths = subfolders.Select(s => baseFolder + "/" + s).ToList();
+            animationPathsByFolder[baseFolder] = paths;
+        }
+
+        public override Graphic Graphic
+        {
+            get
+            {
+                if (chosenGraphic == null)
+                {
+                    InitializeGraphic();
+                }
+                return chosenGraphic;
+            }
+        }
+
+        public override int? OverrideGraphicIndex => frameIndex;
+
+        public override void ExposeData()
+        {
+            base.ExposeData();
+            Scribe_Values.Look(ref chosenAnimPath, "chosenAnimPath");
+        }
+
+        public override void SpawnSetup(Map map, bool respawningAfterLoad)
+        {
+            base.SpawnSetup(map, respawningAfterLoad);
+            if (!respawningAfterLoad)
+            {
+                ChooseNewAnimation();
+            }
+        }
+
+        public override void Tick()
+        {
+            base.Tick();
+            if (ModExtension != null && this.IsHashIntervalTick(ModExtension.animationTickRate))
+            {
+                var graphic = this.Graphic as Graphic_Indexed;
+                if (graphic != null && graphic.SubGraphicsCount > 0)
+                {
+                    frameIndex = (frameIndex + 1) % graphic.SubGraphicsCount;
+                    this.Map.mapDrawer.MapMeshDirty(this.Position, MapMeshFlagDefOf.Things);
+                }
+            }
+        }
+
+        private void ChooseNewAnimation()
+        {
+            if (ModExtension == null) return;
+
+            string baseFolder = ModExtension.baseTexFolder ?? "";
+            CacheAnimationPathsFor(baseFolder);
+
+            animationPathsByFolder.TryGetValue(baseFolder, out var paths);
+
+            if (paths.NullOrEmpty())
+            {
+                chosenAnimPath = this.def.graphicData.texPath;
+            }
+            else
+            {
+                chosenAnimPath = paths.RandomElement();
+            }
+
+            Log.Message($"HoloDancer: def={def.defName} baseTexFolder='{ModExtension?.baseTexFolder}' chosenAnimPath='{chosenAnimPath}'");
+        }
+
+        private void InitializeGraphic()
+        {
+            if (string.IsNullOrEmpty(chosenAnimPath))
+            {
+                ChooseNewAnimation();
+            }
+
+            var graphicData = new GraphicData();
+            graphicData.CopyFrom(this.def.graphicData);
+            graphicData.graphicClass = typeof(Graphic_Indexed);
+            graphicData.texPath = chosenAnimPath;
+            chosenGraphic = graphicData.Graphic;
+        }
+    }
+}
